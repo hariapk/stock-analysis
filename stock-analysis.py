@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Font
 from io import BytesIO
-import re # For robust string manipulation
+import re
 import numpy as np
 
 # --- Configuration and Title ---
@@ -16,11 +16,14 @@ st.set_page_config(
 st.title("📈 Streamlit Stock Analysis Flagging Tool")
 st.markdown("Upload your Excel file to calculate industry averages, apply custom flags, sort, and download the formatted result.")
 
+# Define the new combined flag name
+NEW_SPECIAL_FLAG_NAME = '3B - 10B, PE>Ind, PE2 < PE1, EG2 > EG1'
+
 # --- File Uploader ---
 uploaded_file = st.file_uploader(
     "1. Choose an Excel file (`.xlsx`)",
     type=['xlsx'],
-    help="The file must contain columns like 'Industry', 'PE1', 'Market Cap in millions', 'EPS0', 'EPS1', and 'EPS2'. We will calculate EG1 and EG2 from EPS figures, format EG1/EG2 as percentages (0 decimals), PE1, PE2, PEG1, PEG2 to one decimal place, and EPS0, EPS1, EPS2 to two decimal places."
+    help="The file must contain columns like 'Industry', 'PE1', 'PE2', 'Market Cap in millions', 'EPS0', 'EPS1', and 'EPS2'. We will calculate EG1 and EG2 from EPS figures, format EG1/EG2 as percentages (0 decimals), PE1, PE2, PEG1, PEG2 to one decimal place, and EPS0, EPS1, EPS2 to two decimal places."
 )
 
 def find_robust_column(df_columns, required_key):
@@ -68,14 +71,15 @@ def process_excel_data(uploaded_file):
 
     # --- 1. Data Preparation and Robust Column Mapping ---
     
-    # Define the core columns needed for calculation (EPS columns replace EG columns)
+    # Define the core columns needed for calculation (PE2 is now core)
     required_cols = {
         'industry': None,
         'pe1': None,
+        'pe2': None, # <-- Now required for PE2 < PE1 logic
         'market cap (mil)': None, 
-        'eps0': None, # New requirement for calculating EG1
-        'eps1': None, # New requirement for calculating EG1/EG2
-        'eps2': None, # New requirement for calculating EG2
+        'eps0': None,
+        'eps1': None,
+        'eps2': None,
     }
     
     # Map the required keys to the actual column names in the DataFrame
@@ -85,12 +89,10 @@ def process_excel_data(uploaded_file):
             required_cols[key] = actual_col
         else:
             st.error(f"FATAL ERROR: Could not find a matching column for the required field: **'{key}'**.")
-            st.info(f"The code now requires **'EPS0', 'EPS1', and 'EPS2'** to calculate Earnings Growth (EG). Please check your Excel headers: {list(df.columns)}")
+            st.info(f"The code now requires **'PE1', 'PE2', 'EPS0', 'EPS1', and 'EPS2'** among others. Please check your Excel headers: {list(df.columns)}")
             return None
 
     # --- Columns for Rounding ---
-    
-    # EG1 and EG2 will be calculated as decimal values (e.g., 0.94) and need 2 decimal rounding
     
     # Identify columns for 1 decimal place rounding (PE1, PE2, PEG1, PEG2)
     one_decimal_cols_keys = ['pe1', 'pe2', 'peg1', 'peg2']
@@ -116,6 +118,7 @@ def process_excel_data(uploaded_file):
     # All columns that need to be numeric: core calculation columns + rounding columns
     core_calc_cols = [
         col_map['pe1'], 
+        col_map['pe2'], # <-- Added PE2 to core numeric checks
         col_map['market cap (mil)'], 
         col_map['eps0'], 
         col_map['eps1'], 
@@ -147,8 +150,6 @@ def process_excel_data(uploaded_file):
     # --- 2. Calculate Earnings Growth (EG1 and EG2) as DECIMAL VALUES ---
     
     # Calculate EG1: (EPS1 - EPS0) / EPS0 
-    # This results in the raw decimal value (e.g., 0.9394)
-    # Use np.where to handle division by zero or NaN, setting the growth to NaN in those cases
     df['EG1'] = np.where(
         (df[col_map['eps0']] != 0) & df[col_map['eps0']].notna() & df[col_map['eps1']].notna(),
         (df[col_map['eps1']] - df[col_map['eps0']]) / df[col_map['eps0']],
@@ -179,22 +180,27 @@ def process_excel_data(uploaded_file):
     df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(1)
     df.drop(columns=['IndustryAvgPE1_Calc'], inplace=True) # Drop temp calculation column
 
-    # NEW FLAG: PE1 > Ind PE (Use requested column name for final output)
-    # Condition: PE1 > IndustryAvgPE1
+    # Component Flag 1: PE1 > Ind PE (Required for the combined flag and still kept separate)
     df['PE1 > Ind PE'] = (
         df[col_map['pe1']] > df['IndustryAvgPE1']
     )
     
-    # SpecialFlag: NEW LOGIC - PE1 > Ind PE AND Market Cap 3k-10k
-    df['SpecialFlag'] = (
-        df['PE1 > Ind PE'] & # Use the newly created flag
-        (df[col_map['market cap (mil)']] >= 3000) &
-        (df[col_map['market cap (mil)']] <= 10000)
-    )
-
-    # EG2_gt_EG1 flag: True if EG2 > EG1 (Now using the newly calculated EG columns)
+    # Component Flag 2: EG2 > EG1 (Required for the combined flag and still kept separate)
     df['EG2_gt_EG1'] = df['EG2'] > df['EG1']
 
+    # Component Flag 3: PE2 < PE1 (Required for the combined flag and still kept separate)
+    df['PE2_lt_PE1'] = (
+        df[col_map['pe2']] < df[col_map['pe1']]
+    )
+
+    # COMBINED Flag (Uses the new requested name and combines all four conditions)
+    df[NEW_SPECIAL_FLAG_NAME] = (
+        df['PE1 > Ind PE'] & # 1. PE > Industry Avg
+        df['EG2_gt_EG1'] &   # 2. EG2 > EG1 (Growth is accelerating)
+        df['PE2_lt_PE1'] &   # 3. PE2 < PE1 (Multiple is compressing)
+        (df[col_map['market cap (mil)']] >= 3000) & # 4. Market Cap >= 3B (3000M)
+        (df[col_map['market cap (mil)']] <= 10000)  # 5. Market Cap <= 10B (10000M)
+    )
 
     # --- 5. Sorting ---
     df_sorted = df.sort_values(
@@ -207,26 +213,28 @@ def process_excel_data(uploaded_file):
     
     # --- 6. Column Renaming and Ordering ---
     
-    # Rename the 6 core columns to standardized names for consistency and shading function compliance
+    # Rename the core columns to standardized names for consistency and shading function compliance
     standardized_names = {
         col_map['industry']: 'Industry',
         col_map['pe1']: 'PE1',
+        col_map['pe2']: 'PE2', # Standardize PE2 name
         col_map['market cap (mil)']: 'Market Cap (mil)',
         col_map['eps0']: 'EPS0',
         col_map['eps1']: 'EPS1',
         col_map['eps2']: 'EPS2',
-        # EG1, EG2, IndustryAvgPE1, PE1 > Ind PE, SpecialFlag, EG2_gt_EG1 are standardized calculated columns
+        # Calculated columns: EG1, EG2, IndustryAvgPE1, PE1 > Ind PE, PE2_lt_PE1, NEW_SPECIAL_FLAG_NAME, EG2_gt_EG1
     }
     
-    # Preserve original names for all other mapped columns (like PE2, PEG1, etc.)
+    # Preserve original names for all other mapped columns (like PEG1, PEG2, etc.)
+    core_keys = ['industry', 'pe1', 'pe2', 'market cap (mil)', 'eps0', 'eps1', 'eps2']
     for key, actual_col in col_map.items():
-        if key not in ['industry', 'pe1', 'market cap (mil)', 'eps0', 'eps1', 'eps2']:
+        if key not in core_keys:
             standardized_names[actual_col] = actual_col # Keep original name
 
     df_sorted.rename(columns=standardized_names, inplace=True)
     
-    # Define all calculated columns (NOTE: IndustryAvgPE1 is now rounded to 1 decimal place)
-    calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'PE1 > Ind PE', 'SpecialFlag', 'EG2_gt_EG1']
+    # Define all calculated columns 
+    calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'PE1 > Ind PE', 'PE2_lt_PE1', NEW_SPECIAL_FLAG_NAME, 'EG2_gt_EG1']
     
     # Get all columns currently in the DataFrame
     all_cols = list(df_sorted.columns)
@@ -237,7 +245,7 @@ def process_excel_data(uploaded_file):
         if col not in calculated_cols
     ]
     
-    # --- NEW LOGIC: Insert EG1 and EG2 after EPS2 ---
+    # --- Column Reordering Logic ---
     
     # 1. Find the index of 'EPS2' in the list of original columns
     try:
@@ -245,13 +253,11 @@ def process_excel_data(uploaded_file):
     except ValueError:
         eps2_index = -1 # Fallback if EPS2 is somehow not found
 
-    # Calculated columns that should trail at the end
-    # Note the new PE1 > Ind PE flag is included, and it is placed immediately after IndustryAvgPE1
-    trailing_calculated_cols = ['IndustryAvgPE1', 'PE1 > Ind PE', 'SpecialFlag', 'EG2_gt_EG1']
+    # Calculated columns that should trail at the end (includes the new component flag)
+    trailing_calculated_cols = ['IndustryAvgPE1', 'PE1 > Ind PE', 'PE2_lt_PE1', 'EG2_gt_EG1', NEW_SPECIAL_FLAG_NAME]
     
     if eps2_index != -1:
         # Split the list of original columns:
-        # before_eps2 includes EPS2
         before_eps2 = original_non_calculated_cols[:eps2_index + 1] 
         after_eps2 = original_non_calculated_cols[eps2_index + 1:]
         
@@ -278,7 +284,18 @@ def apply_shading_and_save(df):
     wb = load_workbook(output)
     ws = wb['Processed Stocks']
 
-    # Define the light gray fill
+    # --- Header Styling ---
+    header_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid") # Black fill
+    header_font = Font(color="FFFFFF", bold=True) # White, bold font
+    
+    # Apply header style to the entire first row (column names)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    # --- Row Shading and Number Formatting ---
+    
+    # Define the light gray fill for alternating rows
     gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
 
     # Identify column indices for Industry and Percentage columns
@@ -309,7 +326,9 @@ def apply_shading_and_save(df):
             # Apply fill if toggled
             if gray_toggle:
                 for col in range(1, ws.max_column + 1):
-                    ws.cell(row=row, column=col).fill = gray_fill
+                    # Ensure we don't overwrite the header style
+                    if row > 1:
+                        ws.cell(row=row, column=col).fill = gray_fill
     
     # Apply percentage number format to EG1 and EG2 columns
     # The format "0%" displays the raw decimal value (e.g., 0.94) as 94%
@@ -342,8 +361,8 @@ if uploaded_file is not None:
         st.subheader("Processing Summary")
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Records", len(df_processed))
-        col2.metric("Special Flags (True)", df_processed['SpecialFlag'].sum())
-        col3.metric("New Calculated Columns", 6) # Updated count
+        col2.metric(f"'{NEW_SPECIAL_FLAG_NAME}' (True)", df_processed[NEW_SPECIAL_FLAG_NAME].sum())
+        col3.metric("New Calculated Columns", 7) # Increased by one (PE2_lt_PE1)
         
         # Display the first few rows of the data
         st.subheader("Preview of Processed Data (First 10 Rows) - Check Column Order")
@@ -370,7 +389,7 @@ if uploaded_file is not None:
             <div style="font-size: 0.9em; color: gray;">
                 The downloaded file is sorted by Industry (ASC) and PE1 (DESC) and includes alternating row shading.
                 EG1 and EG2 are formatted as percentages (e.g., 0.94 displays as 94%) and placed next to EPS2.
-                The new flag `PE1 > Ind PE` is now included.
+                The new combined flag is: `3B - 10B, PE>Ind, PE2 < PE1, EG2 > EG1`.
             </div>
             """, unsafe_allow_html=True
         )
