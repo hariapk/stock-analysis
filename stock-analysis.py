@@ -25,8 +25,7 @@ uploaded_file = st.file_uploader(
 def find_robust_column(df_columns, required_key):
     """
     Finds the actual column name in the DataFrame based on a required key,
-    handling casing, spacing, and punctuation variations (like parentheses)
-    to match the user's header: 'Market Cap (mil)'.
+    handling casing, spacing, and punctuation variations (like parentheses).
     Returns the found column name or None.
     """
     # Function to clean a string: remove spaces, lowercase, remove punctuation (like parentheses)
@@ -46,7 +45,7 @@ def find_robust_column(df_columns, required_key):
     if standard_key in standardized_columns:
         return standardized_columns[standard_key]
 
-    # 4. Handle common abbreviations (e.g., matching 'marketcapmil' to 'marketcapinmillions' or 'Market Cap (mil)')
+    # 4. Handle common abbreviations (e.g., matching 'marketcapmil')
     if 'marketcapmil' in standardized_columns:
         return standardized_columns['marketcapmil']
 
@@ -68,7 +67,10 @@ def process_excel_data(uploaded_file):
 
     # --- 1. Data Preparation and Robust Column Mapping ---
     
-    # We now look for 'market cap (mil)' which maps correctly to 'Market Cap (mil)'
+    # Store the original column names for the final output order
+    original_cols_order = df.columns.tolist()
+
+    # Define the 5 core columns needed for calculation
     required_cols = {
         'industry': None,
         'pe1': None,
@@ -100,7 +102,7 @@ def process_excel_data(uploaded_file):
     
     # --- 2. Calculation of Industry Average PE1 ---
     industry_avg_pe = df.groupby(col_map['industry'])[col_map['pe1']].mean().reset_index()
-    industry_avg_pe.rename(columns={col_map['pe1']: 'IndustryAvgPE1'}, inplace=True)
+    industry_avg_pe.rename(columns={col_map['pe1']: 'IndustryAvgPE1_Calc'}, inplace=True) # Use a temp name
 
     # Merge industry average back
     df = pd.merge(df, industry_avg_pe, on=col_map['industry'], how='left')
@@ -109,7 +111,7 @@ def process_excel_data(uploaded_file):
     
     # SpecialFlag: PE1 above industry average AND Market Cap 3k-10k
     df['SpecialFlag'] = (
-        (df[col_map['pe1']] > df['IndustryAvgPE1']) &
+        (df[col_map['pe1']] > df['IndustryAvgPE1_Calc']) &
         (df[col_map['market cap (mil)']] >= 3000) &
         (df[col_map['market cap (mil)']] <= 10000)
     )
@@ -117,8 +119,9 @@ def process_excel_data(uploaded_file):
     # EG2_gt_EG1 flag: True if EG2 > EG1
     df['EG2_gt_EG1'] = df[col_map['eg2']] > df[col_map['eg1']]
 
-    # Round the calculated average for cleaner display
-    df['IndustryAvgPE1'] = df['IndustryAvgPE1'].round(2)
+    # Round the calculated average and rename to final output name
+    df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(2)
+    df.drop(columns=['IndustryAvgPE1_Calc'], inplace=True)
 
     # --- 4. Sorting ---
     df_sorted = df.sort_values(
@@ -129,30 +132,34 @@ def process_excel_data(uploaded_file):
     # Reset index for clean export
     df_sorted.reset_index(drop=True, inplace=True)
     
-    # Rename columns back to a clean, standardized format for output
-    final_cols = {
+    # --- 5. Column Renaming and Ordering to Match Request ---
+    
+    # Rename the 5 core columns to standardized names for consistency and shading function compliance (e.g., handles "industry" -> "Industry")
+    standardized_names = {
         col_map['industry']: 'Industry',
         col_map['pe1']: 'PE1',
         col_map['market cap (mil)']: 'Market Cap (mil)',
         col_map['eg1']: 'EG1',
         col_map['eg2']: 'EG2',
     }
-    df_sorted.rename(columns=final_cols, inplace=True)
+    df_sorted.rename(columns=standardized_names, inplace=True)
     
-    # Select final output columns and order them nicely
-    output_columns = [
-        'Industry', 'PE1', 'IndustryAvgPE1', 'Market Cap (mil)', 'EG1', 'EG2', 
-        'SpecialFlag', 'EG2_gt_EG1'
+    # Get all original columns (now potentially with standardized names for the 5 core ones)
+    # The columns not in the 5 core set retain their original names (e.g., 'Company Name', 'Ticker', 'EPS0', etc.)
+    original_non_calculated_cols = [
+        col for col in df_sorted.columns
+        if col not in ['IndustryAvgPE1', 'SpecialFlag', 'EG2_gt_EG1']
     ]
     
-    # Add any original columns that weren't part of the calculation (like Ticker, Company Name, etc.)
-    # This prevents dropping useful info
-    for col in df_sorted.columns:
-        if col not in output_columns and col not in final_cols.values():
-            output_columns.insert(0, col) # Put these general info columns at the start
+    # Define the final order requested by the user (all originals, then the 3 calculated ones)
+    final_output_cols = original_non_calculated_cols + [
+        'IndustryAvgPE1', 
+        'SpecialFlag', 
+        'EG2_gt_EG1'
+    ]
 
-    # Ensure all required columns are present before slicing
-    df_final = df_sorted[[col for col in output_columns if col in df_sorted.columns]]
+    # Select and reorder the DataFrame, ensuring we only select columns that exist
+    df_final = df_sorted[[col for col in final_output_cols if col in df_sorted.columns]]
     
     return df_final
 
@@ -171,7 +178,7 @@ def apply_shading_and_save(df):
     # Define the light gray fill
     gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
 
-    # Identify column for Industry
+    # Identify column for Industry (this MUST be 'Industry' due to the renaming step in process_excel_data)
     industry_col = None
     for col_num, cell in enumerate(ws[1], start=1):
         if cell.value == "Industry": 
@@ -220,7 +227,7 @@ if uploaded_file is not None:
         col3.metric("New Columns", 3)
         
         # Display the first few rows of the data
-        st.subheader("Preview of Processed Data (First 10 Rows)")
+        st.subheader("Preview of Processed Data (First 10 Rows) - Check Column Order")
         st.dataframe(df_processed.head(10), use_container_width=True)
 
         # --- Download Button ---
