@@ -31,44 +31,48 @@ def process_excel_data(uploaded_file):
         st.error(f"Error loading file: {e}")
         return None
 
-    # --- 1. Data Preparation ---
-    # Strip spaces from column names
-    df.columns = df.columns.str.strip()
+    # --- 1. Data Preparation (Fix for KeyError: Standardize Column Names) ---
+    # Standardize column names: strip spaces and convert to lowercase for robust matching
+    # This prevents the KeyError by ensuring column names like 'Market Cap in millions' are matched regardless of casing.
+    df.columns = df.columns.str.strip().str.lower()
+    
+    # All column references must now use the lowercase names:
+    # 'industry', 'pe1', 'market cap in millions', 'eg1', 'eg2'
 
     # Convert essential columns to numeric, coercing errors to NaN
-    numeric_cols = ['PE1', 'Market Cap in millions', 'EG1', 'EG2']
+    numeric_cols = ['pe1', 'market cap in millions', 'eg1', 'eg2']
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
     # Drop rows where 'Industry' or 'PE1' is missing/invalid
-    df.dropna(subset=['Industry', 'PE1'], inplace=True)
+    df.dropna(subset=['industry', 'pe1'], inplace=True)
     
     # --- 2. Calculation of Industry Average PE1 ---
-    industry_avg_pe = df.groupby('Industry')['PE1'].mean().reset_index()
-    industry_avg_pe.rename(columns={'PE1': 'IndustryAvgPE1'}, inplace=True)
+    industry_avg_pe = df.groupby('industry')['pe1'].mean().reset_index()
+    industry_avg_pe.rename(columns={'pe1': 'IndustryAvgPE1'}, inplace=True)
 
     # Merge industry average back
-    df_merged = pd.merge(df, industry_avg_pe, on='Industry', how='left')
+    df_merged = pd.merge(df, industry_avg_pe, on='industry', how='left')
 
     # --- 3. Feature/Flag Creation ---
     
     # SpecialFlag: PE1 above industry average AND Market Cap 3k-10k
     df_merged['SpecialFlag'] = (
-        (df_merged['PE1'] > df_merged['IndustryAvgPE1']) &
-        (df_merged['Market Cap in millions'] >= 3000) &
-        (df_merged['Market Cap in millions'] <= 10000)
+        (df_merged['pe1'] > df_merged['IndustryAvgPE1']) &
+        (df_merged['market cap in millions'] >= 3000) &
+        (df_merged['market cap in millions'] <= 10000)
     )
 
     # EG2_gt_EG1 flag: True if EG2 > EG1
-    df_merged['EG2_gt_EG1'] = df_merged['EG2'] > df_merged['EG1']
+    df_merged['EG2_gt_EG1'] = df_merged['eg2'] > df_merged['eg1']
 
     # Round the calculated average for cleaner display
     df_merged['IndustryAvgPE1'] = df_merged['IndustryAvgPE1'].round(2)
 
     # --- 4. Sorting ---
     df_sorted = df_merged.sort_values(
-        by=['Industry', 'PE1'],
+        by=['industry', 'pe1'],
         ascending=[True, False]
     )
     
@@ -83,6 +87,7 @@ def apply_shading_and_save(df):
     
     # Use Pandas to export to the buffer, which creates the structure
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Note: Pandas automatically exports the columns with the case currently in the DataFrame (lowercase)
         df.to_excel(writer, sheet_name='Processed Stocks', index=False)
     
     # Load the workbook from the same buffer to apply styles
@@ -95,7 +100,7 @@ def apply_shading_and_save(df):
     # Identify column for Industry (assuming header is in row 1)
     industry_col = None
     for col_num, cell in enumerate(ws[1], start=1):
-        if cell.value == "Industry":
+        if cell.value == "industry": # We look for the standardized lowercase name
             industry_col = col_num
             break
 
@@ -129,7 +134,6 @@ def apply_shading_and_save(df):
 if uploaded_file is not None:
     st.info("File successfully uploaded. Processing data...")
     
-    # Function call is outside the logic block to use the cached data across Streamlit runs
     df_processed = process_excel_data(uploaded_file)
     
     if df_processed is not None and not df_processed.empty:
