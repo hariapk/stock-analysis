@@ -3,6 +3,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from io import BytesIO
+import re # For robust string manipulation
 
 # --- Configuration and Title ---
 st.set_page_config(
@@ -21,64 +22,113 @@ uploaded_file = st.file_uploader(
     help="The file must contain columns like 'Industry', 'PE1', 'Market Cap in millions', 'EG1', and 'EG2'."
 )
 
+def find_robust_column(df_columns, required_key):
+    """
+    Finds the actual column name in the DataFrame based on a required key,
+    handling casing, leading/trailing spaces, and internal differences.
+    Returns the found column name or None.
+    """
+    # 1. Standardize the required key for search (remove spaces and lowercase)
+    standard_key = required_key.lower().replace(' ', '')
+    
+    # 2. Standardize all actual column names to create a map (standardized -> original name)
+    standardized_columns = {col.lower().replace(' ', ''): col for col in df_columns}
+    
+    # 3. Check for exact match of the standardized key
+    if standard_key in standardized_columns:
+        return standardized_columns[standard_key]
+
+    # 4. Handle common variations (basic fuzzy search, useful if the user used e.g., 'marketcap' instead of 'marketcapinmillions')
+    for std_col, original_col in standardized_columns.items():
+        if standard_key in std_col or std_col in standard_key:
+             return original_col
+    
+    return None
+
 @st.cache_data
 def process_excel_data(uploaded_file):
     """Reads, processes, calculates flags, sorts data, and returns a processed Pandas DataFrame."""
     try:
-        # Load Excel file into a Pandas DataFrame
         df = pd.read_excel(uploaded_file)
     except Exception as e:
         st.error(f"Error loading file: {e}")
         return None
 
-    # --- 1. Data Preparation (Fix for KeyError: Standardize Column Names) ---
-    # Standardize column names: strip spaces and convert to lowercase for robust matching
-    # This prevents the KeyError by ensuring column names like 'Market Cap in millions' are matched regardless of casing.
-    df.columns = df.columns.str.strip().str.lower()
+    # --- 1. Data Preparation and Robust Column Mapping ---
     
-    # All column references must now use the lowercase names:
-    # 'industry', 'pe1', 'market cap in millions', 'eg1', 'eg2'
+    # IMPORTANT DEBUGGING STEP: Show the user the column names from their file
+    st.warning(f"Columns found in your uploaded file (case sensitive): {list(df.columns)}")
 
-    # Convert essential columns to numeric, coercing errors to NaN
-    numeric_cols = ['pe1', 'market cap in millions', 'eg1', 'eg2']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    required_cols = {
+        'industry': None,
+        'pe1': None,
+        'market cap in millions': None,
+        'eg1': None,
+        'eg2': None,
+    }
+    
+    # Map the required keys to the actual column names in the DataFrame
+    for key in required_cols.keys():
+        actual_col = find_robust_column(df.columns, key)
+        if actual_col:
+            required_cols[key] = actual_col
+        else:
+            st.error(f"FATAL ERROR: Could not find a matching column for the required field: **'{key}'**.")
+            st.info("Please verify the spelling in your Excel file and try again. The column names must be close to the required fields.")
+            return None
+
+    # Create a simplified map for easy access
+    col_map = {k: v for k, v in required_cols.items()}
+
+    # Convert essential columns to numeric using the actual column names found
+    numeric_cols_actual = [col_map['pe1'], col_map['market cap in millions'], col_map['eg1'], col_map['eg2']]
+    for col in numeric_cols_actual:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
 
     # Drop rows where 'Industry' or 'PE1' is missing/invalid
-    df.dropna(subset=['industry', 'pe1'], inplace=True)
+    df.dropna(subset=[col_map['industry'], col_map['pe1']], inplace=True)
     
     # --- 2. Calculation of Industry Average PE1 ---
-    industry_avg_pe = df.groupby('industry')['pe1'].mean().reset_index()
-    industry_avg_pe.rename(columns={'pe1': 'IndustryAvgPE1'}, inplace=True)
+    industry_avg_pe = df.groupby(col_map['industry'])[col_map['pe1']].mean().reset_index()
+    industry_avg_pe.rename(columns={col_map['pe1']: 'IndustryAvgPE1'}, inplace=True)
 
     # Merge industry average back
-    df_merged = pd.merge(df, industry_avg_pe, on='industry', how='left')
+    df = pd.merge(df, industry_avg_pe, on=col_map['industry'], how='left')
 
     # --- 3. Feature/Flag Creation ---
     
     # SpecialFlag: PE1 above industry average AND Market Cap 3k-10k
-    df_merged['SpecialFlag'] = (
-        (df_merged['pe1'] > df_merged['IndustryAvgPE1']) &
-        (df_merged['market cap in millions'] >= 3000) &
-        (df_merged['market cap in millions'] <= 10000)
+    df['SpecialFlag'] = (
+        (df[col_map['pe1']] > df['IndustryAvgPE1']) &
+        (df[col_map['market cap in millions']] >= 3000) &
+        (df[col_map['market cap in millions']] <= 10000)
     )
 
     # EG2_gt_EG1 flag: True if EG2 > EG1
-    df_merged['EG2_gt_EG1'] = df_merged['eg2'] > df_merged['eg1']
+    df['EG2_gt_EG1'] = df[col_map['eg2']] > df[col_map['eg1']]
 
     # Round the calculated average for cleaner display
-    df_merged['IndustryAvgPE1'] = df_merged['IndustryAvgPE1'].round(2)
+    df['IndustryAvgPE1'] = df['IndustryAvgPE1'].round(2)
 
     # --- 4. Sorting ---
-    df_sorted = df_merged.sort_values(
-        by=['industry', 'pe1'],
+    df_sorted = df.sort_values(
+        by=[col_map['industry'], col_map['pe1']],
         ascending=[True, False]
     )
     
     # Reset index for clean export
     df_sorted.reset_index(drop=True, inplace=True)
-
+    
+    # Rename columns back to a clean, standardized format for output
+    final_cols = {
+        col_map['industry']: 'Industry',
+        col_map['pe1']: 'PE1',
+        col_map['market cap in millions']: 'Market Cap in millions',
+        col_map['eg1']: 'EG1',
+        col_map['eg2']: 'EG2',
+    }
+    df_sorted.rename(columns=final_cols, inplace=True)
+    
     return df_sorted
 
 def apply_shading_and_save(df):
@@ -87,7 +137,6 @@ def apply_shading_and_save(df):
     
     # Use Pandas to export to the buffer, which creates the structure
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Note: Pandas automatically exports the columns with the case currently in the DataFrame (lowercase)
         df.to_excel(writer, sheet_name='Processed Stocks', index=False)
     
     # Load the workbook from the same buffer to apply styles
@@ -97,10 +146,10 @@ def apply_shading_and_save(df):
     # Define the light gray fill
     gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
 
-    # Identify column for Industry (assuming header is in row 1)
+    # Identify column for Industry (now standardized as 'Industry' in the output DataFrame)
     industry_col = None
     for col_num, cell in enumerate(ws[1], start=1):
-        if cell.value == "industry": # We look for the standardized lowercase name
+        if cell.value == "Industry": 
             industry_col = col_num
             break
 
@@ -114,7 +163,6 @@ def apply_shading_and_save(df):
             
             # Toggle shading when industry changes
             if industry_value != current_industry:
-                # Only toggle if the value is not None (to handle sorting edge cases)
                 if industry_value is not None:
                     gray_toggle = not gray_toggle
                 current_industry = industry_value
