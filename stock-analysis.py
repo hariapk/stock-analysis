@@ -90,8 +90,7 @@ def process_excel_data(uploaded_file):
 
     # --- Columns for Rounding ---
     
-    # EG1 and EG2 will be calculated and need 0 decimal rounding (for percentage formatting)
-    actual_zero_decimal_cols_keys = []
+    # EG1 and EG2 will be calculated as decimal values and need 0 decimal rounding *after* calculation
     
     # Identify columns for 1 decimal place rounding (PE1, PE2, PEG1, PEG2)
     one_decimal_cols_keys = ['pe1', 'pe2', 'peg1', 'peg2']
@@ -146,26 +145,27 @@ def process_excel_data(uploaded_file):
     # Drop rows where 'Industry' or 'PE1' is missing/invalid
     df.dropna(subset=[col_map['industry'], col_map['pe1']], inplace=True)
     
-    # --- 2. Calculate Earnings Growth (EG1 and EG2) ---
+    # --- 2. Calculate Earnings Growth (EG1 and EG2) as DECIMAL VALUES ---
     
-    # Calculate EG1: ((EPS1 - EPS0) / EPS0) * 100
+    # Calculate EG1: (EPS1 - EPS0) / EPS0 
+    # This results in the raw decimal value (e.g., 0.9394)
     # Use np.where to handle division by zero or NaN, setting the growth to NaN in those cases
     df['EG1'] = np.where(
         (df[col_map['eps0']] != 0) & df[col_map['eps0']].notna() & df[col_map['eps1']].notna(),
-        ((df[col_map['eps1']] - df[col_map['eps0']]) / df[col_map['eps0']]) * 100,
+        (df[col_map['eps1']] - df[col_map['eps0']]) / df[col_map['eps0']],
         np.nan
     )
     
-    # Calculate EG2: ((EPS2 - EPS1) / EPS1) * 100
+    # Calculate EG2: (EPS2 - EPS1) / EPS1
     df['EG2'] = np.where(
         (df[col_map['eps1']] != 0) & df[col_map['eps1']].notna() & df[col_map['eps2']].notna(),
-        ((df[col_map['eps2']] - df[col_map['eps1']]) / df[col_map['eps1']]) * 100,
+        (df[col_map['eps2']] - df[col_map['eps1']]) / df[col_map['eps1']],
         np.nan
     )
     
-    # Apply 0 decimal rounding to EG columns (for "0%" Excel formatting)
-    df['EG1'] = df['EG1'].round(0)
-    df['EG2'] = df['EG2'].round(0)
+    # Apply 2 decimal rounding to the raw decimal EG columns (e.g., 0.9394 becomes 0.94)
+    df['EG1'] = df['EG1'].round(2)
+    df['EG2'] = df['EG2'].round(2)
     
     # --- 3. Calculation of Industry Average PE1 ---
     industry_avg_pe = df.groupby(col_map['industry'])[col_map['pe1']].mean().reset_index()
@@ -284,7 +284,7 @@ def apply_shading_and_save(df):
                     ws.cell(row=row, column=col).fill = gray_fill
     
     # Apply percentage number format to EG1 and EG2 columns
-    # Excel format "0%" displays the value of 15 as 15% (i.e., it doesn't multiply by 100, just appends %)
+    # The format "0%" displays the raw decimal value (e.g., 0.94) as 94%
     percentage_format = "0%"
     for col_name, col_num in percentage_col_indices.items():
         # Apply format to all data rows (starting from row 2)
