@@ -20,7 +20,7 @@ st.markdown("Upload your Excel file to calculate industry averages, apply custom
 uploaded_file = st.file_uploader(
     "1. Choose an Excel file (`.xlsx`)",
     type=['xlsx'],
-    help="The file must contain columns like 'Industry', 'PE1', 'Market Cap (mil)', 'EPS0', 'EPS1', and 'EPS2'. We will calculate EG1 and EG2 from EPS figures, format EG1/EG2 as percentages (0 decimals), PE1, PE2, PEG1, PEG2 to one decimal place, and EPS0, EPS1, EPS2 to two decimal places."
+    help="The file must contain columns like 'Industry', 'PE1', 'Market Cap in millions', 'EPS0', 'EPS1', and 'EPS2'. We will calculate EG1 and EG2 from EPS figures, format EG1/EG2 as percentages (0 decimals), PE1, PE2, PEG1, PEG2 to one decimal place, and EPS0, EPS1, EPS2 to two decimal places."
 )
 
 def find_robust_column(df_columns, required_key):
@@ -175,9 +175,19 @@ def process_excel_data(uploaded_file):
 
     # --- 4. Feature/Flag Creation ---
     
-    # SpecialFlag: PE1 above industry average AND Market Cap 3k-10k
+    # Round the calculated average to 1 decimal place (to match PE1, PE2, etc.)
+    df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(1)
+    df.drop(columns=['IndustryAvgPE1_Calc'], inplace=True) # Drop temp calculation column
+
+    # NEW FLAG: PE1 > Ind PE (Use requested column name for final output)
+    # Condition: PE1 > IndustryAvgPE1
+    df['PE1 > Ind PE'] = (
+        df[col_map['pe1']] > df['IndustryAvgPE1']
+    )
+    
+    # SpecialFlag: NEW LOGIC - PE1 > Ind PE AND Market Cap 3k-10k
     df['SpecialFlag'] = (
-        (df[col_map['pe1']] > df['IndustryAvgPE1_Calc']) &
+        df['PE1 > Ind PE'] & # Use the newly created flag
         (df[col_map['market cap (mil)']] >= 3000) &
         (df[col_map['market cap (mil)']] <= 10000)
     )
@@ -185,9 +195,6 @@ def process_excel_data(uploaded_file):
     # EG2_gt_EG1 flag: True if EG2 > EG1 (Now using the newly calculated EG columns)
     df['EG2_gt_EG1'] = df['EG2'] > df['EG1']
 
-    # Round the calculated average to 1 decimal place (to match PE1, PE2, etc.)
-    df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(1)
-    df.drop(columns=['IndustryAvgPE1_Calc'], inplace=True)
 
     # --- 5. Sorting ---
     df_sorted = df.sort_values(
@@ -208,7 +215,7 @@ def process_excel_data(uploaded_file):
         col_map['eps0']: 'EPS0',
         col_map['eps1']: 'EPS1',
         col_map['eps2']: 'EPS2',
-        # EG1 and EG2 are now standardized calculated columns
+        # EG1, EG2, IndustryAvgPE1, PE1 > Ind PE, SpecialFlag, EG2_gt_EG1 are standardized calculated columns
     }
     
     # Preserve original names for all other mapped columns (like PE2, PEG1, etc.)
@@ -218,20 +225,42 @@ def process_excel_data(uploaded_file):
 
     df_sorted.rename(columns=standardized_names, inplace=True)
     
-    # Ensure EG1 and EG2 are treated as calculated columns for final ordering
+    # Define all calculated columns (NOTE: IndustryAvgPE1 is now rounded to 1 decimal place)
+    calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'PE1 > Ind PE', 'SpecialFlag', 'EG2_gt_EG1']
     
-    # Get all original columns (now potentially with standardized names for the 6 core ones)
-    calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'SpecialFlag', 'EG2_gt_EG1']
+    # Get all columns currently in the DataFrame
+    all_cols = list(df_sorted.columns)
     
-    # Filter out the calculated columns from the non-calculated list
+    # Filter out the calculated columns from the non-calculated list (these are the 'original' columns)
     original_non_calculated_cols = [
-        col for col in df_sorted.columns
+        col for col in all_cols
         if col not in calculated_cols
     ]
     
-    # Define the final order: originals, then the 5 calculated ones
-    final_output_cols = original_non_calculated_cols + calculated_cols
+    # --- NEW LOGIC: Insert EG1 and EG2 after EPS2 ---
+    
+    # 1. Find the index of 'EPS2' in the list of original columns
+    try:
+        eps2_index = original_non_calculated_cols.index('EPS2')
+    except ValueError:
+        eps2_index = -1 # Fallback if EPS2 is somehow not found
 
+    # Calculated columns that should trail at the end
+    # Note the new PE1 > Ind PE flag is included, and it is placed immediately after IndustryAvgPE1
+    trailing_calculated_cols = ['IndustryAvgPE1', 'PE1 > Ind PE', 'SpecialFlag', 'EG2_gt_EG1']
+    
+    if eps2_index != -1:
+        # Split the list of original columns:
+        # before_eps2 includes EPS2
+        before_eps2 = original_non_calculated_cols[:eps2_index + 1] 
+        after_eps2 = original_non_calculated_cols[eps2_index + 1:]
+        
+        # Build the new final column list: (Before EPS2) + (EG1, EG2) + (After EPS2) + (Trailing Flags)
+        final_output_cols = before_eps2 + ['EG1', 'EG2'] + after_eps2 + trailing_calculated_cols
+    else:
+        # Fallback to previous logic if EPS2 wasn't found
+        final_output_cols = original_non_calculated_cols + calculated_cols
+    
     # Select and reorder the DataFrame, ensuring we only select columns that exist
     df_final = df_sorted[[col for col in final_output_cols if col in df_sorted.columns]]
     
@@ -314,7 +343,7 @@ if uploaded_file is not None:
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Records", len(df_processed))
         col2.metric("Special Flags (True)", df_processed['SpecialFlag'].sum())
-        col3.metric("New Calculated Columns", 5)
+        col3.metric("New Calculated Columns", 6) # Updated count
         
         # Display the first few rows of the data
         st.subheader("Preview of Processed Data (First 10 Rows) - Check Column Order")
@@ -340,7 +369,8 @@ if uploaded_file is not None:
             """
             <div style="font-size: 0.9em; color: gray;">
                 The downloaded file is sorted by Industry (ASC) and PE1 (DESC) and includes alternating row shading.
-                EG1 and EG2 are formatted as percentages (e.g., 0.94 displays as 94%).
+                EG1 and EG2 are formatted as percentages (e.g., 0.94 displays as 94%) and placed next to EPS2.
+                The new flag `PE1 > Ind PE` is now included.
             </div>
             """, unsafe_allow_html=True
         )
