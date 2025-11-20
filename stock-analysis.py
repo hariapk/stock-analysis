@@ -8,12 +8,12 @@ import numpy as np
 
 # --- Configuration and Title ---
 st.set_page_config(
-    page_title="Stock Data Processor",
+    page_title="Strata Stock Assistant", 
     layout="centered",
     initial_sidebar_state="auto"
 )
 
-st.title("📈 Streamlit Stock Analysis Flagging Tool")
+st.title("📈 Strata Stock Assistant") 
 st.markdown("Upload your Excel file to calculate industry averages, apply custom flags, sort, and download the formatted result.")
 
 # Define the full combined flag names
@@ -72,7 +72,7 @@ def process_excel_data(uploaded_file):
 
     # --- 1. Data Preparation and Robust Column Mapping ---
     
-    # Define the core columns needed for calculation (PE2 is now required for the flag logic)
+    # Define the core columns needed for calculation
     required_cols = {
         'industry': None,
         'pe1': None,
@@ -106,10 +106,8 @@ def process_excel_data(uploaded_file):
     
     for key in one_decimal_cols_keys:
         actual_col = find_robust_column(df.columns, key)
-        if actual_col:
-            # Ensure PEG1 and PEG2 are included for rounding if they exist
-            if actual_col not in actual_one_decimal_cols:
-                actual_one_decimal_cols.append(actual_col)
+        if actual_col and actual_col not in actual_one_decimal_cols:
+            actual_one_decimal_cols.append(actual_col)
             # Ensure PEG1, PEG2 are mapped if they weren't in the 7 core
             if key not in required_cols:
                  required_cols[key] = actual_col
@@ -182,44 +180,29 @@ def process_excel_data(uploaded_file):
     df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(1)
     df.drop(columns=['IndustryAvgPE1_Calc'], inplace=True) # Drop temp calculation column
 
-    # Component Flag 1 (Existing logic): PE1 > Ind PE
-    df['PE1 > Ind PE'] = (
-        df[col_map['pe1']] > df['IndustryAvgPE1']
-    )
-    
-    # Component Flag 2 (Existing logic): EG2 > EG1
-    df['EG2_gt_EG1'] = df['EG2'] > df['EG1']
-
-    # Component Flag 3 (Logic kept but column is removed from output): PE1 < Ind PE
-    # We must calculate this boolean series for use in the combined flag below
+    # Component Flags (USED INTERNALLY FOR COMBINED FLAGS, WILL BE DROPPED LATER)
+    pe1_gt_ind_pe_series = (df[col_map['pe1']] > df['IndustryAvgPE1'])
+    eg2_gt_eg1_series = df['EG2'] > df['EG1']
     pe1_lt_ind_pe_series = (df[col_map['pe1']] < df['IndustryAvgPE1'])
-    
-    # Component Flag 4 (Logic kept but column is removed from output): EG2 < EG1
-    # We must calculate this boolean series for use in the combined flag below
     eg2_lt_eg1_series = df['EG2'] < df['EG1']
 
-    # COMBINED Flag 1 (Existing logic)
+    # COMBINED Flag 1 
     df[NEW_SPECIAL_FLAG_NAME] = (
-        df['PE1 > Ind PE'] & # 1. PE > Industry Avg
-        df['EG2_gt_EG1'] &   # 2. EG2 > EG1 (Growth is accelerating)
-        (df[col_map['pe2']] < df[col_map['pe1']]) &   # 3. PE2 < PE1 (Multiple is decreasing - calculated inline)
+        pe1_gt_ind_pe_series & # 1. PE > Industry Avg
+        eg2_gt_eg1_series &   # 2. EG2 > EG1 (Growth is accelerating)
+        (df[col_map['pe2']] < df[col_map['pe1']]) &   # 3. PE2 < PE1 (Multiple is decreasing)
         (df[col_map['market cap (mil)']] >= 3000) & # 4. Market Cap >= 3B (3000M)
         (df[col_map['market cap (mil)']] <= 10000)  # 5. Market Cap <= 10B (10000M)
     )
 
-    # COMBINED Flag 2 (New logic - uses the series calculated above)
+    # COMBINED Flag 2 
     df[NEW_SPECIAL_FLAG_NAME_2] = (
-        pe1_lt_ind_pe_series & # 1. PE < Industry Avg (using the series)
-        eg2_lt_eg1_series &   # 2. EG2 < EG1 (Growth is decelerating - using the series)
+        pe1_lt_ind_pe_series & # 1. PE < Industry Avg 
+        eg2_lt_eg1_series &   # 2. EG2 < EG1 (Growth is decelerating)
         (df[col_map['market cap (mil)']] >= 10000) # 3. Market Cap >= 10B (10000M)
     )
     
-    # --- 5. Clean up temporary and unwanted component flag columns ---
-    # The flags 'PE1 < Ind PE' and 'EG2_lt_EG1' are now only used internally, so we don't need to add them.
-    # We still need 'PE1 > Ind PE' and 'EG2_gt_EG1' for the first combined flag's logic, 
-    # and they can remain in the output as they were not explicitly asked to be removed.
-    
-    # --- 6. Sorting ---
+    # --- 5. Sorting ---
     df_sorted = df.sort_values(
         by=[col_map['industry'], col_map['pe1']],
         ascending=[True, False]
@@ -228,7 +211,7 @@ def process_excel_data(uploaded_file):
     # Reset index for clean export
     df_sorted.reset_index(drop=True, inplace=True)
     
-    # --- 7. Column Renaming and Ordering ---
+    # --- 6. Column Renaming and Ordering ---
     
     # Rename the core columns to standardized names for consistency and shading function compliance
     standardized_names = {
@@ -249,16 +232,19 @@ def process_excel_data(uploaded_file):
 
     df_sorted.rename(columns=standardized_names, inplace=True)
     
-    # Define all calculated columns that should appear in the final output (6 total)
-    calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'PE1 > Ind PE', 'EG2_gt_EG1', NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2]
+    # Define ALL calculated columns, including those to be dropped
+    all_calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'PE1 > Ind PE', 'EG2_gt_EG1', NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2]
     
-    # Get all columns currently in the DataFrame
+    # Define columns to KEEP (EG1, EG2, IndustryAvgPE1, and the two combined flags)
+    retained_calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2]
+
+    # Get all columns currently in the DataFrame (using standardized names)
     all_cols = list(df_sorted.columns)
     
-    # Filter out the calculated columns from the non-calculated list (these are the 'original' columns)
+    # Filter out *all* calculated columns from the non-calculated list 
     original_non_calculated_cols = [
         col for col in all_cols
-        if col not in calculated_cols
+        if col not in all_calculated_cols
     ]
     
     # --- Column Reordering Logic ---
@@ -269,24 +255,33 @@ def process_excel_data(uploaded_file):
     except ValueError:
         eps2_index = -1 # Fallback if EPS2 is somehow not found
 
-    # Calculated columns that should trail at the end 
-    # Note: 'PE1 < Ind PE' and 'EG2_lt_EG1' are intentionally excluded here.
-    trailing_calculated_cols = ['IndustryAvgPE1', 'PE1 > Ind PE', 'EG2_gt_EG1', NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2]
+    # Calculated columns that should trail at the end (only retained flags/metrics)
+    trailing_calculated_cols = ['IndustryAvgPE1', NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2]
     
     if eps2_index != -1:
         # Split the list of original columns:
         before_eps2 = original_non_calculated_cols[:eps2_index + 1] 
         after_eps2 = original_non_calculated_cols[eps2_index + 1:]
         
-        # Build the new final column list: (Before EPS2) + (EG1, EG2) + (After EPS2) + (Trailing Flags)
+        # Build the new final column list: (Before EPS2) + (EG1, EG2) + (After EPS2) + (Trailing Metrics/Flags)
         final_output_cols = before_eps2 + ['EG1', 'EG2'] + after_eps2 + trailing_calculated_cols
     else:
         # Fallback to previous logic if EPS2 wasn't found
-        final_output_cols = original_non_calculated_cols + calculated_cols
+        # In this case, we place EG1/EG2 at the end of the original columns, then the trailing flags
+        final_output_cols = original_non_calculated_cols + ['EG1', 'EG2'] + trailing_calculated_cols
     
     # Select and reorder the DataFrame, ensuring we only select columns that exist
     df_final = df_sorted[[col for col in final_output_cols if col in df_sorted.columns]]
     
+    # --- 7. Remove the component flags explicitly from the final DataFrame ---
+    # The columns 'PE1 > Ind PE' and 'EG2_gt_EG1' are now only used during step 4 calculation and are not in the final column list (final_output_cols) if the logic above worked correctly.
+    # To be doubly sure and handle any edge cases in column mapping that might leave them behind, we explicitly drop them here just before returning.
+    cols_to_drop = ['PE1 > Ind PE', 'EG2_gt_EG1']
+    for col in cols_to_drop:
+        if col in df_final.columns:
+            df_final.drop(columns=[col], inplace=True)
+            
+    # The number of calculated columns that remain are 5: EG1, EG2, IndustryAvgPE1, NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2
     return df_final
 
 def apply_shading_and_save(df):
@@ -380,8 +375,8 @@ if uploaded_file is not None:
         col1.metric("Total Records", len(df_processed))
         col2.metric(f"'{NEW_SPECIAL_FLAG_NAME}' (True)", df_processed[NEW_SPECIAL_FLAG_NAME].sum())
         col3.metric(f"'{NEW_SPECIAL_FLAG_NAME_2}' (True)", df_processed[NEW_SPECIAL_FLAG_NAME_2].sum())
-        # The number of calculated columns is reduced from 8 to 6 in the final output
-        col4.metric("New Calculated Columns", 6) 
+        # The number of calculated columns that remain is now 5: EG1, EG2, IndustryAvgPE1, and the two combined flags
+        col4.metric("New Calculated Columns", 5) 
         
         # Display the first few rows of the data
         st.subheader("Preview of Processed Data (First 10 Rows) - Check Column Order")
@@ -408,7 +403,7 @@ if uploaded_file is not None:
             <div style="font-size: 0.9em; color: gray;">
                 The downloaded file is sorted by Industry (ASC) and PE1 (DESC) and includes alternating row shading.
                 EG1 and EG2 are formatted as percentages (e.g., 0.94 displays as 94%) and placed next to EPS2.
-                The new combined flags are: `{NEW_SPECIAL_FLAG_NAME}` and `{NEW_SPECIAL_FLAG_NAME_2}`.
+                The only flags included now are the three calculated metrics: `IndustryAvgPE1`, `{NEW_SPECIAL_FLAG_NAME}` and `{NEW_SPECIAL_FLAG_NAME_2}`.
             </div>
             """, unsafe_allow_html=True
         )
