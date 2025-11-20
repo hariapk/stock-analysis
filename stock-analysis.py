@@ -16,8 +16,9 @@ st.set_page_config(
 st.title("📈 Streamlit Stock Analysis Flagging Tool")
 st.markdown("Upload your Excel file to calculate industry averages, apply custom flags, sort, and download the formatted result.")
 
-# Define the new combined flag name
+# Define the full combined flag names
 NEW_SPECIAL_FLAG_NAME = '3B - 10B, PE>Ind, PE2 < PE1, EG2 > EG1'
+NEW_SPECIAL_FLAG_NAME_2 = '10B+, PE < Ind, EG2 < EG1'
 
 # --- File Uploader ---
 uploaded_file = st.file_uploader(
@@ -71,11 +72,11 @@ def process_excel_data(uploaded_file):
 
     # --- 1. Data Preparation and Robust Column Mapping ---
     
-    # Define the core columns needed for calculation (PE2 is now core)
+    # Define the core columns needed for calculation (PE2 is now required for the flag logic)
     required_cols = {
         'industry': None,
         'pe1': None,
-        'pe2': None, # <-- Now required for PE2 < PE1 logic
+        'pe2': None, 
         'market cap (mil)': None, 
         'eps0': None,
         'eps1': None,
@@ -88,8 +89,9 @@ def process_excel_data(uploaded_file):
         if actual_col:
             required_cols[key] = actual_col
         else:
+            # All these columns are now critical for calculation/flagging
             st.error(f"FATAL ERROR: Could not find a matching column for the required field: **'{key}'**.")
-            st.info(f"The code now requires **'PE1', 'PE2', 'EPS0', 'EPS1', and 'EPS2'** among others. Please check your Excel headers: {list(df.columns)}")
+            st.info(f"The code now requires **'Industry', 'PE1', 'PE2', 'Market Cap (mil)', 'EPS0', 'EPS1', and 'EPS2'**. Please check your Excel headers: {list(df.columns)}")
             return None
 
     # --- Columns for Rounding ---
@@ -98,11 +100,17 @@ def process_excel_data(uploaded_file):
     one_decimal_cols_keys = ['pe1', 'pe2', 'peg1', 'peg2']
     actual_one_decimal_cols = []
     
+    # Add mapped PE1 and PE2 first
+    if required_cols['pe1']: actual_one_decimal_cols.append(required_cols['pe1'])
+    if required_cols['pe2']: actual_one_decimal_cols.append(required_cols['pe2'])
+    
     for key in one_decimal_cols_keys:
         actual_col = find_robust_column(df.columns, key)
         if actual_col:
-            actual_one_decimal_cols.append(actual_col)
-            # Ensure PE2, PEG1, PEG2 are mapped if they weren't in the 6 core
+            # Ensure PEG1 and PEG2 are included for rounding if they exist
+            if actual_col not in actual_one_decimal_cols:
+                actual_one_decimal_cols.append(actual_col)
+            # Ensure PEG1, PEG2 are mapped if they weren't in the 7 core
             if key not in required_cols:
                  required_cols[key] = actual_col
             
@@ -113,17 +121,11 @@ def process_excel_data(uploaded_file):
     
     
     # Create a simplified map for easy access
-    col_map = {k: v for k, v in required_cols.items()}
+    col_map = {k: v for k, v in required_cols.items() if v is not None} # Only include mapped columns
 
     # All columns that need to be numeric: core calculation columns + rounding columns
-    core_calc_cols = [
-        col_map['pe1'], 
-        col_map['pe2'], # <-- Added PE2 to core numeric checks
-        col_map['market cap (mil)'], 
-        col_map['eps0'], 
-        col_map['eps1'], 
-        col_map['eps2']
-    ]
+    core_calc_cols = [col_map[k] for k in ['pe1', 'pe2', 'market cap (mil)', 'eps0', 'eps1', 'eps2']]
+    core_calc_cols = [col for col in core_calc_cols if col is not None] # Filter out Nones
     
     # Combine all numeric columns and use set to ensure unique list of actual column names
     numeric_cols_actual = list(set(core_calc_cols + actual_one_decimal_cols + actual_two_decimal_cols)) 
@@ -180,26 +182,36 @@ def process_excel_data(uploaded_file):
     df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(1)
     df.drop(columns=['IndustryAvgPE1_Calc'], inplace=True) # Drop temp calculation column
 
-    # Component Flag 1: PE1 > Ind PE (Required for the combined flag and still kept separate)
+    # Component Flag 1 (Existing): PE1 > Ind PE
     df['PE1 > Ind PE'] = (
         df[col_map['pe1']] > df['IndustryAvgPE1']
     )
     
-    # Component Flag 2: EG2 > EG1 (Required for the combined flag and still kept separate)
+    # Component Flag 2 (Existing): EG2 > EG1
     df['EG2_gt_EG1'] = df['EG2'] > df['EG1']
 
-    # Component Flag 3: PE2 < PE1 (Required for the combined flag and still kept separate)
-    df['PE2_lt_PE1'] = (
-        df[col_map['pe2']] < df[col_map['pe1']]
+    # Component Flag 3 (New): PE1 < Ind PE
+    df['PE1 < Ind PE'] = (
+        df[col_map['pe1']] < df['IndustryAvgPE1']
     )
+    
+    # Component Flag 4 (New): EG2 < EG1
+    df['EG2_lt_EG1'] = df['EG2'] < df['EG1']
 
-    # COMBINED Flag (Uses the new requested name and combines all four conditions)
+    # COMBINED Flag 1 (Existing logic)
     df[NEW_SPECIAL_FLAG_NAME] = (
         df['PE1 > Ind PE'] & # 1. PE > Industry Avg
         df['EG2_gt_EG1'] &   # 2. EG2 > EG1 (Growth is accelerating)
-        df['PE2_lt_PE1'] &   # 3. PE2 < PE1 (Multiple is compressing)
+        (df[col_map['pe2']] < df[col_map['pe1']]) &   # 3. PE2 < PE1 (Multiple is decreasing - calculated inline)
         (df[col_map['market cap (mil)']] >= 3000) & # 4. Market Cap >= 3B (3000M)
         (df[col_map['market cap (mil)']] <= 10000)  # 5. Market Cap <= 10B (10000M)
+    )
+
+    # COMBINED Flag 2 (New logic)
+    df[NEW_SPECIAL_FLAG_NAME_2] = (
+        df['PE1 < Ind PE'] & # 1. PE < Industry Avg
+        df['EG2_lt_EG1'] &   # 2. EG2 < EG1 (Growth is decelerating)
+        (df[col_map['market cap (mil)']] >= 10000) # 3. Market Cap >= 10B (10000M)
     )
 
     # --- 5. Sorting ---
@@ -217,24 +229,24 @@ def process_excel_data(uploaded_file):
     standardized_names = {
         col_map['industry']: 'Industry',
         col_map['pe1']: 'PE1',
-        col_map['pe2']: 'PE2', # Standardize PE2 name
+        col_map['pe2']: 'PE2', 
         col_map['market cap (mil)']: 'Market Cap (mil)',
         col_map['eps0']: 'EPS0',
         col_map['eps1']: 'EPS1',
         col_map['eps2']: 'EPS2',
-        # Calculated columns: EG1, EG2, IndustryAvgPE1, PE1 > Ind PE, PE2_lt_PE1, NEW_SPECIAL_FLAG_NAME, EG2_gt_EG1
+        # Calculated columns: EG1, EG2, IndustryAvgPE1, PE1 > Ind PE, EG2_gt_EG1, PE1 < Ind PE, EG2_lt_EG1, NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2
     }
     
     # Preserve original names for all other mapped columns (like PEG1, PEG2, etc.)
     core_keys = ['industry', 'pe1', 'pe2', 'market cap (mil)', 'eps0', 'eps1', 'eps2']
     for key, actual_col in col_map.items():
-        if key not in core_keys:
+        if actual_col and key not in core_keys:
             standardized_names[actual_col] = actual_col # Keep original name
 
     df_sorted.rename(columns=standardized_names, inplace=True)
     
-    # Define all calculated columns 
-    calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'PE1 > Ind PE', 'PE2_lt_PE1', NEW_SPECIAL_FLAG_NAME, 'EG2_gt_EG1']
+    # Define all calculated columns (total 8)
+    calculated_cols = ['EG1', 'EG2', 'IndustryAvgPE1', 'PE1 > Ind PE', 'EG2_gt_EG1', 'PE1 < Ind PE', 'EG2_lt_EG1', NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2]
     
     # Get all columns currently in the DataFrame
     all_cols = list(df_sorted.columns)
@@ -253,8 +265,8 @@ def process_excel_data(uploaded_file):
     except ValueError:
         eps2_index = -1 # Fallback if EPS2 is somehow not found
 
-    # Calculated columns that should trail at the end (includes the new component flag)
-    trailing_calculated_cols = ['IndustryAvgPE1', 'PE1 > Ind PE', 'PE2_lt_PE1', 'EG2_gt_EG1', NEW_SPECIAL_FLAG_NAME]
+    # Calculated columns that should trail at the end 
+    trailing_calculated_cols = ['IndustryAvgPE1', 'PE1 > Ind PE', 'EG2_gt_EG1', 'PE1 < Ind PE', 'EG2_lt_EG1', NEW_SPECIAL_FLAG_NAME, NEW_SPECIAL_FLAG_NAME_2]
     
     if eps2_index != -1:
         # Split the list of original columns:
@@ -359,10 +371,11 @@ if uploaded_file is not None:
         
         # Display Summary
         st.subheader("Processing Summary")
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total Records", len(df_processed))
         col2.metric(f"'{NEW_SPECIAL_FLAG_NAME}' (True)", df_processed[NEW_SPECIAL_FLAG_NAME].sum())
-        col3.metric("New Calculated Columns", 7) # Increased by one (PE2_lt_PE1)
+        col3.metric(f"'{NEW_SPECIAL_FLAG_NAME_2}' (True)", df_processed[NEW_SPECIAL_FLAG_NAME_2].sum())
+        col4.metric("New Calculated Columns", 8) 
         
         # Display the first few rows of the data
         st.subheader("Preview of Processed Data (First 10 Rows) - Check Column Order")
@@ -385,11 +398,11 @@ if uploaded_file is not None:
         )
         
         st.markdown(
-            """
+            f"""
             <div style="font-size: 0.9em; color: gray;">
                 The downloaded file is sorted by Industry (ASC) and PE1 (DESC) and includes alternating row shading.
                 EG1 and EG2 are formatted as percentages (e.g., 0.94 displays as 94%) and placed next to EPS2.
-                The new combined flag is: `3B - 10B, PE>Ind, PE2 < PE1, EG2 > EG1`.
+                The new combined flags are: `{NEW_SPECIAL_FLAG_NAME}` and `{NEW_SPECIAL_FLAG_NAME_2}`.
             </div>
             """, unsafe_allow_html=True
         )
