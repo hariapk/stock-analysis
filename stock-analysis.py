@@ -19,7 +19,7 @@ st.markdown("Upload your Excel file to calculate industry averages, apply custom
 uploaded_file = st.file_uploader(
     "1. Choose an Excel file (`.xlsx`)",
     type=['xlsx'],
-    help="The file must contain columns like 'Industry', 'PE1', 'Market Cap (mil)', 'EG1', and 'EG2'."
+    help="The file must contain columns like 'Industry', 'PE1', 'Market Cap (mil)', 'EG1', and 'EG2'. We will format PE1, PE2, PEG1, PEG2 to one decimal place, EG1 and EG2 as percentages (0 decimals), and EPS0, EPS1, EPS2 to two decimal places."
 )
 
 def find_robust_column(df_columns, required_key):
@@ -67,9 +67,6 @@ def process_excel_data(uploaded_file):
 
     # --- 1. Data Preparation and Robust Column Mapping ---
     
-    # Store the original column names for the final output order
-    original_cols_order = df.columns.tolist()
-
     # Define the 5 core columns needed for calculation
     required_cols = {
         'industry': None,
@@ -89,13 +86,72 @@ def process_excel_data(uploaded_file):
             st.info(f"The code requires a column for '{key}'. Please check your Excel headers: {list(df.columns)}")
             return None
 
+    # --- Columns for Rounding ---
+    
+    # Identify columns for 0 decimal place rounding (EG1, EG2)
+    zero_decimal_cols_keys = ['eg1', 'eg2']
+    actual_zero_decimal_cols = []
+    
+    for key in zero_decimal_cols_keys:
+        # NOTE: EG1 and EG2 are already in required_cols, so we just map them for rounding.
+        # Use the actual column name found in the initial required_cols mapping
+        if key in required_cols and required_cols[key]:
+            actual_zero_decimal_cols.append(required_cols[key])
+        
+    # Identify columns for 1 decimal place rounding (PE1, PE2, PEG1, PEG2)
+    one_decimal_cols_keys = ['pe1', 'pe2', 'peg1', 'peg2']
+    actual_one_decimal_cols = []
+    
+    for key in one_decimal_cols_keys:
+        actual_col = find_robust_column(df.columns, key)
+        if actual_col:
+            actual_one_decimal_cols.append(actual_col)
+            # Ensure PE2, PEG1, PEG2 are mapped if they weren't in the 5 core (PE1 is always core)
+            if key not in required_cols:
+                 required_cols[key] = actual_col
+            
+    # Identify columns for 2 decimal place rounding (EPS0, EPS1, EPS2)
+    two_decimal_cols_keys = ['eps0', 'eps1', 'eps2']
+    actual_two_decimal_cols = []
+    
+    for key in two_decimal_cols_keys:
+        actual_col = find_robust_column(df.columns, key)
+        if actual_col:
+            actual_two_decimal_cols.append(actual_col)
+            # Add to required_cols to ensure they are handled if not already present
+            required_cols[key] = actual_col 
+
+
     # Create a simplified map for easy access
     col_map = {k: v for k, v in required_cols.items()}
 
-    # Convert essential columns to numeric using the actual column names found
-    numeric_cols_actual = [col_map['pe1'], col_map['market cap (mil)'], col_map['eg1'], col_map['eg2']]
+    # All columns that need to be numeric: core calculation columns + rounding columns
+    core_calc_cols = [col_map['pe1'], col_map['market cap (mil)'], col_map['eg1'], col_map['eg2']]
+    
+    # Combine all numeric columns and use set to ensure unique list of actual column names
+    numeric_cols_actual = list(set(core_calc_cols + actual_one_decimal_cols + actual_two_decimal_cols + actual_zero_decimal_cols)) 
+
     for col in numeric_cols_actual:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Check if the column exists before converting
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+    # Apply 0 decimal rounding to EG columns (This is needed for the number format "0%")
+    for col in actual_zero_decimal_cols:
+        if col in df.columns:
+            # We round to 0 decimal places to get a whole number value for the percentage format
+            df[col] = df[col].round(0)
+            
+    # Apply 1 decimal rounding to the PE/PEG columns
+    for col in actual_one_decimal_cols:
+        if col in df.columns:
+            df[col] = df[col].round(1)
+    
+    # Apply 2 decimal rounding to the requested EPS columns
+    for col in actual_two_decimal_cols:
+        if col in df.columns:
+            df[col] = df[col].round(2)
+
 
     # Drop rows where 'Industry' or 'PE1' is missing/invalid
     df.dropna(subset=[col_map['industry'], col_map['pe1']], inplace=True)
@@ -119,8 +175,8 @@ def process_excel_data(uploaded_file):
     # EG2_gt_EG1 flag: True if EG2 > EG1
     df['EG2_gt_EG1'] = df[col_map['eg2']] > df[col_map['eg1']]
 
-    # Round the calculated average and rename to final output name
-    df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(2)
+    # Round the calculated average to 1 decimal place (to match PE1, PE2, etc.)
+    df['IndustryAvgPE1'] = df['IndustryAvgPE1_Calc'].round(1)
     df.drop(columns=['IndustryAvgPE1_Calc'], inplace=True)
 
     # --- 4. Sorting ---
@@ -134,7 +190,7 @@ def process_excel_data(uploaded_file):
     
     # --- 5. Column Renaming and Ordering to Match Request ---
     
-    # Rename the 5 core columns to standardized names for consistency and shading function compliance (e.g., handles "industry" -> "Industry")
+    # Rename the 5 core columns to standardized names for consistency and shading function compliance
     standardized_names = {
         col_map['industry']: 'Industry',
         col_map['pe1']: 'PE1',
@@ -142,21 +198,24 @@ def process_excel_data(uploaded_file):
         col_map['eg1']: 'EG1',
         col_map['eg2']: 'EG2',
     }
+    
+    # Preserve original names for all other mapped columns (like PE2, PEG1, EPS0, etc.)
+    for key, actual_col in col_map.items():
+        if key not in ['industry', 'pe1', 'market cap (mil)', 'eg1', 'eg2']:
+            standardized_names[actual_col] = actual_col # Keep original name
+
     df_sorted.rename(columns=standardized_names, inplace=True)
     
     # Get all original columns (now potentially with standardized names for the 5 core ones)
-    # The columns not in the 5 core set retain their original names (e.g., 'Company Name', 'Ticker', 'EPS0', etc.)
+    calculated_cols = ['IndustryAvgPE1', 'SpecialFlag', 'EG2_gt_EG1']
+    
     original_non_calculated_cols = [
         col for col in df_sorted.columns
-        if col not in ['IndustryAvgPE1', 'SpecialFlag', 'EG2_gt_EG1']
+        if col not in calculated_cols
     ]
     
     # Define the final order requested by the user (all originals, then the 3 calculated ones)
-    final_output_cols = original_non_calculated_cols + [
-        'IndustryAvgPE1', 
-        'SpecialFlag', 
-        'EG2_gt_EG1'
-    ]
+    final_output_cols = original_non_calculated_cols + calculated_cols
 
     # Select and reorder the DataFrame, ensuring we only select columns that exist
     df_final = df_sorted[[col for col in final_output_cols if col in df_sorted.columns]]
@@ -178,12 +237,16 @@ def apply_shading_and_save(df):
     # Define the light gray fill
     gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
 
-    # Identify column for Industry (this MUST be 'Industry' due to the renaming step in process_excel_data)
+    # Identify column indices for Industry and Percentage columns
     industry_col = None
+    percentage_cols = ['EG1', 'EG2']
+    percentage_col_indices = {}
+    
     for col_num, cell in enumerate(ws[1], start=1):
         if cell.value == "Industry": 
             industry_col = col_num
-            break
+        if cell.value in percentage_cols:
+             percentage_col_indices[cell.value] = col_num
 
     # Apply alternating shading by industry
     if industry_col:
@@ -203,6 +266,16 @@ def apply_shading_and_save(df):
             if gray_toggle:
                 for col in range(1, ws.max_column + 1):
                     ws.cell(row=row, column=col).fill = gray_fill
+    
+    # Apply percentage number format to EG1 and EG2 columns
+    # Excel format "0%" displays the value of 15 as 15% (i.e., it doesn't multiply by 100, just appends %)
+    percentage_format = "0%"
+    for col_name, col_num in percentage_col_indices.items():
+        # Apply format to all data rows (starting from row 2)
+        for row in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row, column=col_num)
+            cell.number_format = percentage_format
+
 
     # Save the modified workbook back to a new BytesIO buffer
     final_output = BytesIO()
