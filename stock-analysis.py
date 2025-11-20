@@ -19,26 +19,38 @@ st.markdown("Upload your Excel file to calculate industry averages, apply custom
 uploaded_file = st.file_uploader(
     "1. Choose an Excel file (`.xlsx`)",
     type=['xlsx'],
-    help="The file must contain columns like 'Industry', 'PE1', 'Market Cap in millions', 'EG1', and 'EG2'."
+    help="The file must contain columns like 'Industry', 'PE1', 'Market Cap (mil)', 'EG1', and 'EG2'."
 )
 
 def find_robust_column(df_columns, required_key):
     """
     Finds the actual column name in the DataFrame based on a required key,
-    handling casing, leading/trailing spaces, and internal differences.
+    handling casing, spacing, and punctuation variations (like parentheses)
+    to match the user's header: 'Market Cap (mil)'.
     Returns the found column name or None.
     """
-    # 1. Standardize the required key for search (remove spaces and lowercase)
-    standard_key = required_key.lower().replace(' ', '')
+    # Function to clean a string: remove spaces, lowercase, remove punctuation (like parentheses)
+    def clean_string(s):
+        s = s.lower().replace(' ', '')
+        # Remove common punctuation symbols for robustness
+        s = re.sub(r'[()\[\]\{\}\.\-\_]', '', s)
+        return s
+
+    # 1. Standardize the required key for search
+    standard_key = clean_string(required_key)
     
-    # 2. Standardize all actual column names to create a map (standardized -> original name)
-    standardized_columns = {col.lower().replace(' ', ''): col for col in df_columns}
+    # 2. Map cleaned column names to their original names
+    standardized_columns = {clean_string(col): col for col in df_columns}
     
     # 3. Check for exact match of the standardized key
     if standard_key in standardized_columns:
         return standardized_columns[standard_key]
 
-    # 4. Handle common variations (basic fuzzy search, useful if the user used e.g., 'marketcap' instead of 'marketcapinmillions')
+    # 4. Handle common abbreviations (e.g., matching 'marketcapmil' to 'marketcapinmillions' or 'Market Cap (mil)')
+    if 'marketcapmil' in standardized_columns:
+        return standardized_columns['marketcapmil']
+
+    # 5. Fallback fuzzy search 
     for std_col, original_col in standardized_columns.items():
         if standard_key in std_col or std_col in standard_key:
              return original_col
@@ -56,13 +68,11 @@ def process_excel_data(uploaded_file):
 
     # --- 1. Data Preparation and Robust Column Mapping ---
     
-    # IMPORTANT DEBUGGING STEP: Show the user the column names from their file
-    st.warning(f"Columns found in your uploaded file (case sensitive): {list(df.columns)}")
-
+    # We now look for 'market cap (mil)' which maps correctly to 'Market Cap (mil)'
     required_cols = {
         'industry': None,
         'pe1': None,
-        'market cap in millions': None,
+        'market cap (mil)': None, 
         'eg1': None,
         'eg2': None,
     }
@@ -74,14 +84,14 @@ def process_excel_data(uploaded_file):
             required_cols[key] = actual_col
         else:
             st.error(f"FATAL ERROR: Could not find a matching column for the required field: **'{key}'**.")
-            st.info("Please verify the spelling in your Excel file and try again. The column names must be close to the required fields.")
+            st.info(f"The code requires a column for '{key}'. Please check your Excel headers: {list(df.columns)}")
             return None
 
     # Create a simplified map for easy access
     col_map = {k: v for k, v in required_cols.items()}
 
     # Convert essential columns to numeric using the actual column names found
-    numeric_cols_actual = [col_map['pe1'], col_map['market cap in millions'], col_map['eg1'], col_map['eg2']]
+    numeric_cols_actual = [col_map['pe1'], col_map['market cap (mil)'], col_map['eg1'], col_map['eg2']]
     for col in numeric_cols_actual:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -100,8 +110,8 @@ def process_excel_data(uploaded_file):
     # SpecialFlag: PE1 above industry average AND Market Cap 3k-10k
     df['SpecialFlag'] = (
         (df[col_map['pe1']] > df['IndustryAvgPE1']) &
-        (df[col_map['market cap in millions']] >= 3000) &
-        (df[col_map['market cap in millions']] <= 10000)
+        (df[col_map['market cap (mil)']] >= 3000) &
+        (df[col_map['market cap (mil)']] <= 10000)
     )
 
     # EG2_gt_EG1 flag: True if EG2 > EG1
@@ -123,13 +133,28 @@ def process_excel_data(uploaded_file):
     final_cols = {
         col_map['industry']: 'Industry',
         col_map['pe1']: 'PE1',
-        col_map['market cap in millions']: 'Market Cap in millions',
+        col_map['market cap (mil)']: 'Market Cap (mil)',
         col_map['eg1']: 'EG1',
         col_map['eg2']: 'EG2',
     }
     df_sorted.rename(columns=final_cols, inplace=True)
     
-    return df_sorted
+    # Select final output columns and order them nicely
+    output_columns = [
+        'Industry', 'PE1', 'IndustryAvgPE1', 'Market Cap (mil)', 'EG1', 'EG2', 
+        'SpecialFlag', 'EG2_gt_EG1'
+    ]
+    
+    # Add any original columns that weren't part of the calculation (like Ticker, Company Name, etc.)
+    # This prevents dropping useful info
+    for col in df_sorted.columns:
+        if col not in output_columns and col not in final_cols.values():
+            output_columns.insert(0, col) # Put these general info columns at the start
+
+    # Ensure all required columns are present before slicing
+    df_final = df_sorted[[col for col in output_columns if col in df_sorted.columns]]
+    
+    return df_final
 
 def apply_shading_and_save(df):
     """Applies openpyxl formatting to a dataframe and saves to BytesIO."""
@@ -146,7 +171,7 @@ def apply_shading_and_save(df):
     # Define the light gray fill
     gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
 
-    # Identify column for Industry (now standardized as 'Industry' in the output DataFrame)
+    # Identify column for Industry
     industry_col = None
     for col_num, cell in enumerate(ws[1], start=1):
         if cell.value == "Industry": 
