@@ -90,7 +90,7 @@ def process_excel_data(uploaded_file):
 
     # --- Columns for Rounding ---
     
-    # EG1 and EG2 will be calculated as decimal values and need 0 decimal rounding *after* calculation
+    # EG1 and EG2 will be calculated as decimal values (e.g., 0.94) and need 2 decimal rounding
     
     # Identify columns for 1 decimal place rounding (PE1, PE2, PEG1, PEG2)
     one_decimal_cols_keys = ['pe1', 'pe2', 'peg1', 'peg2']
@@ -106,7 +106,6 @@ def process_excel_data(uploaded_file):
             
 
     # Identify columns for 2 decimal place rounding (EPS0, EPS1, EPS2)
-    # These are already in required_cols, so we just use their actual names
     two_decimal_cols_keys = ['eps0', 'eps1', 'eps2']
     actual_two_decimal_cols = [required_cols[k] for k in two_decimal_cols_keys if k in required_cols and required_cols[k]]
     
@@ -319,6 +318,7 @@ if uploaded_file is not None:
         
         # Display the first few rows of the data
         st.subheader("Preview of Processed Data (First 10 Rows) - Check Column Order")
+        # Displaying the raw decimal value (e.g., 0.94) in Streamlit is expected for this method.
         st.dataframe(df_processed.head(10), use_container_width=True)
 
         # --- Download Button ---
@@ -340,6 +340,7 @@ if uploaded_file is not None:
             """
             <div style="font-size: 0.9em; color: gray;">
                 The downloaded file is sorted by Industry (ASC) and PE1 (DESC) and includes alternating row shading.
+                EG1 and EG2 are formatted as percentages (e.g., 0.94 displays as 94%).
             </div>
             """, unsafe_allow_html=True
         )
